@@ -48,9 +48,25 @@ pi-ci status       # read-only compact summary, exit 0
 
 Exactly three, auto-detected by marker file: `node` (package.json), `go` (go.mod), `rust` (Cargo.toml). Missing or ambiguous detection fails with a clear message; pass `--kind` to disambiguate (the marker for the explicit kind must still exist).
 
-- **node**: reuses your existing `npm run validate` (check) and `npm ci && npm run ci` (ci — fresh install keeps local and CI identical). If either script is missing, init/audit fail — scripts are never invented for you.
+- **node**: reuses your existing `npm run validate` (check) and `npm ci && npm run ci` (ci — fresh install keeps local and CI identical).
 - **go**: stdlib only, no new dependencies. check = `gofmt` verification + `go vet` + `go test`; ci = check + `-race` + `go build`.
 - **rust**: check = `cargo fmt --check` + `cargo check` + `cargo clippy -- -D warnings`; ci = check + `cargo test`.
+
+## Prerequisites
+
+`init` fails mutation-free when any prerequisite is absent; `audit` reports them; `status` shows values or `missing`. pi-ci never installs dependencies, writes versions, adds scripts, or creates biome config.
+
+**All kinds** — `mise.toml` must pin the toolchain in a plain `[tools]` table with one-line quoted assignments, e.g. `node = "24.18.0"`. Parsing limitation: inline tables, multi-line arrays, and dotted keys are not parsed (no TOML dependency); use the plain form.
+
+**Node:**
+
+- `package-lock.json` must exist (generated ci runs `npm ci`).
+- `package.json` scripts, all non-empty after trim:
+  - `quality` must normalize to exactly `biome ci .`
+  - `validate` must invoke `npm run quality`
+  - `ci` must invoke `npm run quality` or `npm run validate`
+  - recursion rejected: `validate` must not invoke `mise run check`, `ci` must not invoke `mise run ci`
+- `devDependencies` must contain a non-empty `@biomejs/biome` version, and `biome.json` must exist (`biome.jsonc` unsupported).
 
 ## Safety
 
@@ -62,7 +78,7 @@ Exactly three, auto-detected by marker file: `node` (package.json), `go` (go.mod
 
 ## Toolchain versions
 
-The project's own `mise.toml` `[tools]` section owns and pins Node/Go/Rust versions. pi-ci-standard never writes `[tools]` and `audit` does not enforce versions — it only manages the `check`/`ci` tasks, workflow, and AGENTS.md block.
+The project's own `mise.toml` `[tools]` section owns and pins Node/Go/Rust versions. pi-ci requires the pin to exist but never chooses or writes a version.
 
 ## Design boundaries
 

@@ -25,18 +25,26 @@ const AGENTS_END = "<!-- pi-ci-standard:validation:end -->";
 
 const MISE_CONFLICT = /^\s*\[tasks\.(check|ci)\]/m;
 
+function isFile(path: string): boolean {
+	try {
+		return statSync(path).isFile();
+	} catch {
+		return false;
+	}
+}
+
 export function detectKind(dir: string, explicit?: string): Kind {
 	if (explicit !== undefined) {
 		if (!KINDS.includes(explicit as Kind)) {
 			throw new CiError(`unknown kind "${explicit}" (expected: ${KINDS.join("|")})`);
 		}
 		const kind = explicit as Kind;
-		if (!existsSync(join(dir, MARKER_FILE[kind]))) {
+		if (!isFile(join(dir, MARKER_FILE[kind]))) {
 			throw new CiError(`--kind ${kind}: no ${MARKER_FILE[kind]} found in ${dir}`);
 		}
 		return kind;
 	}
-	const found = KINDS.filter((k) => existsSync(join(dir, MARKER_FILE[k])));
+	const found = KINDS.filter((k) => isFile(join(dir, MARKER_FILE[k])));
 	if (found.length === 0) {
 		throw new CiError(
 			`could not detect project kind in ${dir}: no package.json, go.mod, or Cargo.toml (or pass --kind ${KINDS.join("|")})`,
@@ -225,25 +233,138 @@ function planAgents(dir: string): Planned {
 	return next === content ? planned(path, "unchanged", null) : planned(path, "updated", next);
 }
 
-function missingNodeScripts(dir: string): string[] {
-	const pkgPath = join(dir, "package.json");
-	let pkg: { scripts?: Record<string, string> };
+interface PackageJson {
+	scripts?: Record<string, string>;
+	devDependencies?: Record<string, string>;
+}
+
+function loadPackage(dir: string): PackageJson {
+	const path = join(dir, "package.json");
+	if (!isFile(path)) throw new CiError("cannot read package.json: not a regular file");
 	try {
-		pkg = JSON.parse(readFileSync(pkgPath, "utf8")) as { scripts?: Record<string, string> };
+		return JSON.parse(readFileSync(path, "utf8")) as PackageJson;
 	} catch (err) {
 		throw new CiError(`cannot read package.json: ${err instanceof Error ? err.message : String(err)}`);
 	}
-	const scripts = pkg.scripts ?? {};
-	return ["validate", "ci"].filter((name) => typeof scripts[name] !== "string");
 }
 
-function assertNodeScripts(dir: string): void {
-	const missing = missingNodeScripts(dir);
-	if (missing.length > 0) {
-		throw new CiError(
-			`package.json missing required scripts: ${missing.join(", ")}; ` +
-				"pi-ci-standard reuses existing scripts and does not invent project-specific ones — add them, then re-run: pi-ci init",
-		);
+interface Prereq {
+	label: string;
+	ok: boolean;
+	detail: string; // value on success, problems on failure
+	problems: string[];
+}
+
+function prereqOk(label: string, detail: string): Prereq {
+	return { label, ok: true, detail, problems: [] };
+}
+
+function prereqFail(label: string, problems: string[]): Prereq {
+	return { label, ok: false, detail: problems.join("; "), problems };
+}
+
+// ponytail: minimal line parser for a plain [tools] table with one-line quoted
+// assignments (node = "24.18.0"). Inline tables, multi-line arrays, and
+// biome.jsonc-style variants are unsupported by design; no TOML dependency.
+function toolPin(miseContent: string | null, tool: string): string | null {
+	if (miseContent === null) return null;
+	let inTools = false;
+	for (const line of miseContent.split("\n")) {
+		const trimmed = line.trim();
+		if (trimmed.startsWith("[")) {
+			inTools = trimmed === "[tools]";
+			continue;
+		}
+		if (!inTools) continue;
+		const match = trimmed.match(/^([A-Za-z][\w-]*)\s*=\s*(?:"([^"]*)"|'([^']*)')\s*(?:#.*)?$/);
+		const key = match?.[1];
+		if (match && key === tool) {
+			const value = (match[2] ?? match[3] ?? "").trim();
+			return value === "" ? null : value;
+		}
+	}
+	return null;
+}
+
+function scriptProblems(scripts: Record<string, string>): string[] {
+	const problems: string[] = [];
+	for (const name of ["quality", "validate", "ci"]) {
+		const value = scripts[name];
+		if (typeof value !== "string" || value.trim() === "") problems.push(`missing or empty script: ${name}`);
+	}
+	const quality = (scripts.quality ?? "").trim();
+	if (quality !== "" && quality !== "biome ci .") {
+		problems.push(`script quality must be exactly "biome ci ." (got "${scripts.quality ?? ""}")`);
+	}
+	const validate = (scripts.validate ?? "").trim();
+	if (validate !== "") {
+		if (!validate.includes("npm run quality")) problems.push('script validate must invoke "npm run quality"');
+		if (validate.includes("mise run check"))
+			problems.push('script validate must not invoke "mise run check" (recursion)');
+	}
+	const ci = (scripts.ci ?? "").trim();
+	if (ci !== "") {
+		if (!ci.includes("npm run quality") && !ci.includes("npm run validate")) {
+			problems.push('script ci must invoke "npm run quality" or "npm run validate"');
+		}
+		if (ci.includes("mise run ci")) problems.push('script ci must not invoke "mise run ci" (recursion)');
+	}
+	return problems;
+}
+
+function biomeProblems(dir: string, pkg: PackageJson): string[] {
+	const problems: string[] = [];
+	const version = pkg.devDependencies?.["@biomejs/biome"];
+	if (typeof version !== "string" || version.trim() === "") {
+		problems.push("devDependencies must contain a non-empty @biomejs/biome version");
+	}
+	if (!isFile(join(dir, "biome.json"))) {
+		problems.push("missing biome.json (biome.jsonc is not supported)");
+	}
+	return problems;
+}
+
+function prerequisites(dir: string, kind: Kind): Prereq[] {
+	const items: Prereq[] = [];
+	const misePath = join(dir, "mise.toml");
+	const pin = toolPin(isFile(misePath) ? readFileSync(misePath, "utf8") : null, kind);
+	items.push(
+		pin === null
+			? {
+					label: `pin ${kind}`,
+					ok: false,
+					detail: "missing",
+					problems: [
+						`mise.toml needs a non-empty [tools] pin (add: ${kind} = "<version>"); pi-ci never chooses versions`,
+					],
+				}
+			: prereqOk(`pin ${kind}`, pin),
+	);
+	if (kind !== "node") return items;
+	if (!isFile(join(dir, "package-lock.json"))) {
+		items.push({
+			label: "lockfile",
+			ok: false,
+			detail: "missing",
+			problems: ["missing package-lock.json (generated ci task runs npm ci)"],
+		});
+	} else {
+		items.push(prereqOk("lockfile", "ok"));
+	}
+	const pkg = loadPackage(dir);
+	const scripts = scriptProblems(pkg.scripts ?? {});
+	items.push(scripts.length > 0 ? prereqFail("scripts", scripts) : prereqOk("scripts", "ok"));
+	const biome = biomeProblems(dir, pkg);
+	items.push(
+		biome.length > 0 ? prereqFail("biome", biome) : prereqOk("biome", pkg.devDependencies?.["@biomejs/biome"] ?? "ok"),
+	);
+	return items;
+}
+
+function assertPrerequisites(dir: string, kind: Kind): void {
+	const problems = prerequisites(dir, kind).flatMap((p) => p.problems);
+	if (problems.length > 0) {
+		throw new CiError(`prerequisites not met:\n${problems.map((p) => `- ${p}`).join("\n")}`);
 	}
 }
 
@@ -263,7 +384,7 @@ const OK_AGENTS = "AGENTS.md";
 
 function auditMise(dir: string, kind: Kind): Finding[] {
 	const path = join(dir, "mise.toml");
-	if (!existsSync(path)) return [fail(OK_MISE, "missing (run: pi-ci init)")];
+	if (!isFile(path)) return [fail(OK_MISE, "missing (run: pi-ci init)")];
 	const content = readFileSync(path, "utf8");
 	const { before, block, after } = splitManaged(content, MISE_START, MISE_END);
 	const findings: Finding[] = [];
@@ -298,15 +419,9 @@ function auditAgents(dir: string): Finding {
 }
 
 function auditProject(dir: string, kind: Kind): Finding[] {
-	const findings: Finding[] = [];
-	if (kind === "node") {
-		const missing = missingNodeScripts(dir);
-		findings.push(
-			missing.length > 0
-				? fail("package.json", `missing required scripts: ${missing.join(", ")}`)
-				: { ok: true, label: "package.json" },
-		);
-	}
+	const findings: Finding[] = prerequisites(dir, kind).map((p) =>
+		p.ok ? { ok: true, label: p.label } : fail(p.label, p.problems.join("; ")),
+	);
 	findings.push(...auditMise(dir, kind));
 	findings.push(auditWorkflow(dir));
 	findings.push(auditAgents(dir));
@@ -357,7 +472,7 @@ function parseArgs(argv: string[], cwd: string): ParsedArgs {
 function dispatch(parsed: ParsedArgs): RunResult {
 	const kind = detectKind(parsed.dir, parsed.kind);
 	if (parsed.sub === "init") {
-		if (kind === "node") assertNodeScripts(parsed.dir);
+		assertPrerequisites(parsed.dir, kind);
 		const plans = [planMise(parsed.dir, kind), planWorkflow(parsed.dir), planAgents(parsed.dir)];
 		for (const plan of plans) {
 			if (plan.content === null) continue;
@@ -376,8 +491,14 @@ function dispatch(parsed: ParsedArgs): RunResult {
 		lines.push(failed === 0 ? `audit passed (kind: ${kind})` : `audit failed: ${failed} finding(s) (kind: ${kind})`);
 		return { code: failed === 0 ? 0 : 1, output: lines.join("\n") };
 	}
+	const prereqs = prerequisites(parsed.dir, kind);
+	const prereqLabels = new Set(prereqs.map((p) => p.label));
 	const lines = [`kind: ${kind}`];
-	for (const f of findings) lines.push(`${f.label}: ${f.ok ? "ok" : (f.detail ?? "fail")}`);
+	for (const p of prereqs) lines.push(`${p.label}: ${p.detail}`);
+	for (const f of findings) {
+		if (prereqLabels.has(f.label)) continue;
+		lines.push(`${f.label}: ${f.ok ? "ok" : (f.detail ?? "fail")}`);
+	}
 	return { code: 0, output: lines.join("\n") };
 }
 
