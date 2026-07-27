@@ -48,6 +48,19 @@ function nodeProject(dir: string): void {
 	writeFileSync(join(dir, "mise.toml"), '[tools]\nnode = "24.18.0"\n');
 }
 
+function goProjectWithDuplicatePlatformCommand(dir: string): void {
+	writeFileSync(join(dir, "go.mod"), "module example.com/x\n");
+	writeFileSync(join(dir, "mise.toml"), '[tools]\ngo = "1.26.5"\n');
+	writeFileSync(
+		join(dir, ".pi-ci.json"),
+		JSON.stringify({
+			check: "make check",
+			ci: "make check",
+			platform: { command: "make check", runners: ["macos-latest"] },
+		}),
+	);
+}
+
 function harness(cwd: string) {
 	const notifications: Notice[] = [];
 	const messages: string[] = [];
@@ -83,7 +96,8 @@ after(() => {
 describe("pi-ci-standard extension", () => {
 	it("registers only the /ci command, no LLM tools", () => {
 		const { command } = harness(fixture());
-		assert.match(command.description ?? "", /init\|audit\|status\|fix/);
+		assert.match(command.description ?? "", /init\|audit\|fix/);
+		assert.doesNotMatch(command.description ?? "", /status/);
 	});
 
 	it("fix notifies and sends no message when audit already passes", async () => {
@@ -94,6 +108,18 @@ describe("pi-ci-standard extension", () => {
 		await command.handler("fix", ctx);
 		assert.deepEqual(messages, []);
 		assert.deepEqual(notifications, [{ text: "CI standard already satisfied", level: "info" }]);
+	});
+
+	it("fix reviews a passing config when platform command duplicates primary CI", async () => {
+		const dir = fixture();
+		goProjectWithDuplicatePlatformCommand(dir);
+		assert.equal(run(["init"], dir).code, 0);
+		const { command, notifications, messages, ctx } = harness(dir);
+		await command.handler("fix", ctx);
+		assert.deepEqual(notifications, []);
+		assert.equal(messages.length, 1);
+		assert.match(messages[0] ?? "", /ok platform command: matches ci; review duplicate execution/);
+		assert.match(messages[0] ?? "", /platform jobs focused on platform-sensitive tests and builds/);
 	});
 
 	it("fix sends exactly one deterministic repair message on audit findings", async () => {
@@ -113,6 +139,8 @@ describe("pi-ci-standard extension", () => {
 		for (const rule of [
 			/never lower thresholds/,
 			/never delete tests, coverage, or package\/runtime smoke/,
+			/Preserve guarantees, not duplicate executions/,
+			/platform jobs focused on platform-sensitive tests and builds/,
 			/migrate its behavior/,
 			/Preserve unrelated existing mise\.toml and AGENTS\.md/,
 			/without evidence from the project or the user/,

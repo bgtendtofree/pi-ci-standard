@@ -51,9 +51,8 @@ describe("detection", () => {
 	it("detects node, go, rust from marker files", () => {
 		const dir = fixture();
 		nodePkg(dir);
-		const result = run(["status"], dir);
-		assert.equal(result.code, 0, result.output);
-		assert.match(result.output, /^kind: node$/m);
+		const result = run(["audit"], dir);
+		assert.match(result.output, /\(kind: node\)$/m);
 
 		for (const [kind, marker] of [
 			["go", "go.mod"],
@@ -61,14 +60,13 @@ describe("detection", () => {
 		] as const) {
 			const plain = fixture();
 			writeFileSync(join(plain, marker), "");
-			const plainResult = run(["status"], plain);
-			assert.equal(plainResult.code, 0, plainResult.output);
-			assert.match(plainResult.output, new RegExp(`^kind: ${kind}$`, "m"));
+			const plainResult = run(["audit"], plain);
+			assert.match(plainResult.output, new RegExp(`\\(kind: ${kind}\\)$`, "m"));
 		}
 	});
 
 	it("fails clearly when no marker exists", () => {
-		const result = run(["status"], fixture());
+		const result = run(["audit"], fixture());
 		assert.equal(result.code, 1);
 		assert.match(result.output, /could not detect project kind/);
 	});
@@ -77,7 +75,7 @@ describe("detection", () => {
 		const dir = fixture();
 		nodePkg(dir);
 		writeFileSync(join(dir, "go.mod"), "");
-		const result = run(["status"], dir);
+		const result = run(["audit"], dir);
 		assert.equal(result.code, 1);
 		assert.match(result.output, /ambiguous project kind/);
 	});
@@ -86,16 +84,15 @@ describe("detection", () => {
 		const dir = fixture();
 		nodePkg(dir);
 		writeFileSync(join(dir, "go.mod"), "");
-		const resolved = run(["status", "--kind", "go"], dir);
-		assert.equal(resolved.code, 0, resolved.output);
-		assert.match(resolved.output, /^kind: go$/m);
+		const resolved = run(["audit", "--kind", "go"], dir);
+		assert.match(resolved.output, /\(kind: go\)$/m);
 
 		const empty = fixture();
-		const bad = run(["status", "--kind=rust"], empty);
+		const bad = run(["audit", "--kind=rust"], empty);
 		assert.equal(bad.code, 1);
 		assert.match(bad.output, /--kind rust: no Cargo\.toml/);
 
-		const unknown = run(["status", "--kind", "python"], dir);
+		const unknown = run(["audit", "--kind", "python"], dir);
 		assert.equal(unknown.code, 1);
 		assert.match(unknown.output, /unknown kind "python"/);
 	});
@@ -104,14 +101,15 @@ describe("detection", () => {
 		assert.match(run([], fixture()).output, /usage: pi-ci/);
 		assert.match(run(["run"], fixture()).output, /unknown subcommand "run"/);
 		assert.match(run(["fix"], fixture()).output, /unknown subcommand "fix"/);
-		assert.match(run(["status", "--force"], fixture()).output, /unknown flag: --force/);
+		assert.match(run(["status"], fixture()).output, /unknown subcommand "status"/);
+		assert.match(run(["audit", "--force"], fixture()).output, /unknown flag: --force/);
 	});
 
 	it("shows help without requiring a project", () => {
 		for (const args of [["--help"], ["-h"], ["help"], ["audit", "--help"]]) {
 			const result = run(args, fixture());
 			assert.equal(result.code, 0, result.output);
-			assert.ok(result.output.includes("audit   Audit configuration only; does not run project checks"));
+			assert.ok(result.output.includes("audit   Show details and audit configuration; does not run project checks"));
 			assert.ok(result.output.includes("mise run check  Run iterative project checks"));
 			assert.ok(result.output.includes("mise run ci     Run full CI gate"));
 		}
@@ -132,13 +130,13 @@ describe("prerequisites", () => {
 			assert.match(result.output, new RegExp(`non-empty \\[tools\\] pin \\(add: ${kind} = `));
 			assert.equal(existsSync(join(dir, "mise.toml")), false, "must not create mise.toml");
 			assert.equal(existsSync(join(dir, "AGENTS.md")), false);
-			const status = run(["status"], dir);
-			assert.equal(status.code, 0, status.output);
-			assert.match(status.output, new RegExp(`^pin ${kind}: missing$`, "m"));
+			const audit = run(["audit"], dir);
+			assert.equal(audit.code, 1, audit.output);
+			assert.match(audit.output, new RegExp(`^FAIL pin ${kind}: `, "m"));
 		}
 	});
 
-	it("rejects empty pin values and shows pinned value in status", () => {
+	it("rejects empty pin values and shows pinned value in audit", () => {
 		const dir = fixture();
 		nodePkg(dir);
 		writeFileSync(join(dir, "mise.toml"), '[tools]\nnode = "  "\n');
@@ -147,17 +145,16 @@ describe("prerequisites", () => {
 		assert.match(result.output, /non-empty \[tools\] pin/);
 
 		nodePkg(dir);
-		const status = run(["status"], dir);
-		assert.match(status.output, /^pin node: 24\.18\.0$/m);
+		const audit = run(["audit"], dir);
+		assert.match(audit.output, /^ok pin node: 24\.18\.0$/m);
 	});
 
 	it("accepts trailing comments but rejects trailing garbage in pins", () => {
 		const dir = fixture();
 		nodePkg(dir);
 		writeFileSync(join(dir, "mise.toml"), '[tools]\nnode = "24.18.0" # lts line\n');
-		const status = run(["status"], dir);
-		assert.equal(status.code, 0, status.output);
-		assert.match(status.output, /^pin node: 24\.18\.0$/m);
+		const audit = run(["audit"], dir);
+		assert.match(audit.output, /^ok pin node: 24\.18\.0$/m);
 
 		writeFileSync(join(dir, "mise.toml"), '[tools]\nnode = "24.18.0" junk\n');
 		const bad = run(["init"], dir);
@@ -179,14 +176,14 @@ describe("prerequisites", () => {
 
 		const goDir = fixture();
 		mkdirSync(join(goDir, "go.mod"));
-		const detected = run(["status"], goDir);
+		const detected = run(["audit"], goDir);
 		assert.equal(detected.code, 1);
 		assert.match(detected.output, /could not detect project kind/);
 		assert.ok(!detected.output.includes("EISDIR"));
 
 		const pkgDir = fixture();
 		mkdirSync(join(pkgDir, "package.json"));
-		const pkgResult = run(["status"], pkgDir);
+		const pkgResult = run(["audit"], pkgDir);
 		assert.equal(pkgResult.code, 1);
 		assert.match(pkgResult.output, /could not detect project kind/);
 	});
@@ -330,6 +327,39 @@ describe("init generation", () => {
 		}
 	});
 
+	it("supports project commands and platform runners", () => {
+		const dir = fixture();
+		goFixture(dir);
+		writeFileSync(
+			join(dir, ".pi-ci.json"),
+			`${JSON.stringify({
+				check: "make check",
+				ci: "make check",
+				platform: {
+					command: "go test -race -count=1 ./... && go build ./...",
+					runners: ["macos-latest", "ubuntu-24.04-arm"],
+				},
+			})}\n`,
+		);
+		const result = run(["init"], dir);
+		assert.equal(result.code, 0, result.output);
+		const mise = readFileSync(join(dir, "mise.toml"), "utf8");
+		assert.match(mise, /description = "Project check command"\nrun = "make check"/);
+		assert.match(mise, /description = "Project full CI command"\nrun = "make check"/);
+		assert.match(mise, /\[tasks\.platform-check\]/);
+		assert.ok(mise.includes('run = "go test -race -count=1 ./... && go build ./..."'));
+		const workflow = readFileSync(join(dir, ".github", "workflows", "ci.yml"), "utf8");
+		assert.ok(workflow.includes('runner: ["macos-latest", "ubuntu-24.04-arm"]'));
+		assert.match(workflow, /runs-on: \$\{\{ matrix\.runner \}\}/);
+		assert.match(workflow, /run: mise run platform-check/);
+		const audit = run(["audit"], dir);
+		assert.equal(audit.code, 0, audit.output);
+		assert.match(audit.output, /^ok project commands: check=custom, ci=custom$/m);
+		assert.match(audit.output, /^ok platform runners: macos-latest, ubuntu-24\.04-arm$/m);
+		assert.match(audit.output, /^ok platform command: distinct$/m);
+		assert.match(audit.output, /^ok workflow: ubuntu-latest, macos-latest, ubuntu-24\.04-arm$/m);
+	});
+
 	it("generates rust tasks with warnings denied", () => {
 		const dir = fixture();
 		rustFixture(dir);
@@ -422,16 +452,43 @@ describe("conflict refusal", () => {
 		const dir = fixture();
 		writeFileSync(join(dir, "package.json"), "{ not json");
 		writeFileSync(join(dir, "mise.toml"), '[tools]\nnode = "24.18.0"\n');
-		for (const sub of ["init", "audit", "status"]) {
+		for (const sub of ["init", "audit"]) {
 			const result = run([sub], dir);
 			assert.equal(result.code, 1, `${sub} should fail`);
 			assert.match(result.output, /cannot read package\.json/);
 			assert.ok(!result.output.includes("    at "), `${sub} leaked a stack trace`);
 		}
 	});
+
+	it("rejects invalid project configuration without mutation", () => {
+		for (const config of [
+			{ unknown: true },
+			{ platform: { command: "go test ./...", runners: [] } },
+			{ platform: { command: "go test ./...", runners: ["macos-latest\ninjected:"] } },
+		]) {
+			const dir = fixture();
+			goFixture(dir);
+			writeFileSync(join(dir, ".pi-ci.json"), JSON.stringify(config));
+			const before = readFileSync(join(dir, "mise.toml"), "utf8");
+			const result = run(["init"], dir);
+			assert.equal(result.code, 1, result.output);
+			assert.match(result.output, /^error: \.pi-ci\.json/);
+			assert.equal(readFileSync(join(dir, "mise.toml"), "utf8"), before);
+			assert.equal(existsSync(join(dir, ".github", "workflows", "ci.yml")), false);
+		}
+	});
+
+	it("keeps node command customization in package.json", () => {
+		const dir = fixture();
+		nodePkg(dir);
+		writeFileSync(join(dir, ".pi-ci.json"), JSON.stringify({ check: "make check" }));
+		const result = run(["init"], dir);
+		assert.equal(result.code, 1, result.output);
+		assert.match(result.output, /overrides are unavailable for node/);
+	});
 });
 
-describe("audit and status", () => {
+describe("audit", () => {
 	it("audit passes right after init", () => {
 		const dir = fixture();
 		nodePkg(dir);
@@ -485,26 +542,21 @@ describe("audit and status", () => {
 		assert.match(audit.output, /FAIL scripts: missing or empty script: validate/);
 	});
 
-	it("status shows kind, prerequisites, and artifacts; stays exit 0 on drift", () => {
+	it("shows pins, command mode, platform runners, and workflow runners", () => {
 		const dir = fixture();
 		nodePkg(dir);
 		assert.equal(run(["init"], dir).code, 0);
-		const status = run(["status"], dir);
-		assert.equal(status.code, 0, status.output);
-		assert.match(status.output, /^kind: node$/m);
-		assert.match(status.output, /^pin node: 24\.18\.0$/m);
-		assert.match(status.output, /^lockfile: ok$/m);
-		assert.match(status.output, /^scripts: ok$/m);
-		assert.match(status.output, /^biome: 2\.5\.4$/m);
-		assert.match(status.output, /^mise\.toml: ok$/m);
-		assert.match(status.output, /^workflow: ok$/m);
-		assert.match(status.output, /^AGENTS\.md: ok$/m);
-
-		const broken = fixture();
-		nodePkg(broken);
-		const brokenStatus = run(["status"], broken);
-		assert.equal(brokenStatus.code, 0, brokenStatus.output);
-		assert.match(brokenStatus.output, /^mise\.toml: no pi-ci-standard managed block/m);
+		const audit = run(["audit"], dir);
+		assert.equal(audit.code, 0, audit.output);
+		assert.match(audit.output, /^ok pin node: 24\.18\.0$/m);
+		assert.match(audit.output, /^ok lockfile$/m);
+		assert.match(audit.output, /^ok scripts$/m);
+		assert.match(audit.output, /^ok biome: 2\.5\.4$/m);
+		assert.match(audit.output, /^ok project commands: package\.json validate\/ci$/m);
+		assert.match(audit.output, /^ok platform runners: none$/m);
+		assert.match(audit.output, /^ok mise\.toml$/m);
+		assert.match(audit.output, /^ok workflow: ubuntu-latest$/m);
+		assert.match(audit.output, /^ok AGENTS\.md$/m);
 	});
 });
 
@@ -522,6 +574,6 @@ describe("cli bin", () => {
 
 		const help = spawnSync(process.execPath, [cliPath, "--help"], { encoding: "utf8" });
 		assert.equal(help.status, 0, help.stderr);
-		assert.ok(help.stdout.includes("audit   Audit configuration only"));
+		assert.ok(help.stdout.includes("audit   Show details and audit configuration"));
 	});
 });

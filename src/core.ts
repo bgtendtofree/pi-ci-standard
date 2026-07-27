@@ -43,6 +43,69 @@ function isFile(path: string): boolean {
 	}
 }
 
+interface PlatformConfig {
+	command: string;
+	runners: string[];
+}
+
+interface ProjectConfig {
+	check?: string;
+	ci?: string;
+	platform?: PlatformConfig;
+}
+
+function ownKeys(value: object, allowed: string[], label: string): void {
+	const unknown = Object.keys(value).filter((key) => !allowed.includes(key));
+	if (unknown.length > 0) throw new CiError(`${label}: unknown field(s): ${unknown.join(", ")}`);
+}
+
+function configCommand(value: unknown, label: string): string | undefined {
+	if (value === undefined) return undefined;
+	if (typeof value !== "string" || value.trim() === "") throw new CiError(`${label} must be a non-empty string`);
+	return value.trim();
+}
+
+function loadConfig(dir: string, kind: Kind): ProjectConfig {
+	const path = join(dir, ".pi-ci.json");
+	if (!existsSync(path)) return {};
+	if (!isFile(path)) throw new CiError(".pi-ci.json is not a regular file");
+	let value: unknown;
+	try {
+		value = JSON.parse(readFileSync(path, "utf8"));
+	} catch (err) {
+		throw new CiError(`cannot read .pi-ci.json: ${err instanceof Error ? err.message : String(err)}`);
+	}
+	if (typeof value !== "object" || value === null || Array.isArray(value)) {
+		throw new CiError(".pi-ci.json must contain an object");
+	}
+	ownKeys(value, ["check", "ci", "platform"], ".pi-ci.json");
+	if (kind === "node" && ("check" in value || "ci" in value)) {
+		throw new CiError(".pi-ci.json check/ci overrides are unavailable for node; use package.json validate/ci scripts");
+	}
+	const config: ProjectConfig = {};
+	const check = configCommand(Reflect.get(value, "check"), ".pi-ci.json check");
+	const ci = configCommand(Reflect.get(value, "ci"), ".pi-ci.json ci");
+	if (check !== undefined) config.check = check;
+	if (ci !== undefined) config.ci = ci;
+	const platform = Reflect.get(value, "platform");
+	if (platform === undefined) return config;
+	if (typeof platform !== "object" || platform === null || Array.isArray(platform)) {
+		throw new CiError(".pi-ci.json platform must contain an object");
+	}
+	ownKeys(platform, ["command", "runners"], ".pi-ci.json platform");
+	const platformCommand = configCommand(Reflect.get(platform, "command"), ".pi-ci.json platform.command");
+	const runners = Reflect.get(platform, "runners");
+	if (platformCommand === undefined || !Array.isArray(runners) || runners.length === 0) {
+		throw new CiError(".pi-ci.json platform requires command and at least one runner");
+	}
+	if (!runners.every((runner) => typeof runner === "string" && /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(runner))) {
+		throw new CiError(".pi-ci.json platform.runners contains an invalid runner label");
+	}
+	if (new Set(runners).size !== runners.length) throw new CiError(".pi-ci.json platform.runners contains duplicates");
+	config.platform = { command: platformCommand, runners } as PlatformConfig;
+	return config;
+}
+
 export function detectKind(dir: string, explicit?: string): Kind {
 	if (explicit !== undefined) {
 		if (!KINDS.includes(explicit as Kind)) {
@@ -70,7 +133,11 @@ export function detectKind(dir: string, explicit?: string): Kind {
 	return kind;
 }
 
-function miseBlock(kind: Kind): string {
+function task(description: string, run: string): string {
+	return `description = ${JSON.stringify(description)}\nrun = ${JSON.stringify(run)}\n`;
+}
+
+function miseBlock(kind: Kind, config: ProjectConfig): string {
 	const tasks: Record<Kind, string> = {
 		node: `[tasks.check]
 description = "Iterative checks (npm run validate)"
@@ -113,10 +180,44 @@ depends = ["check"]
 run = "cargo test"
 `,
 	};
-	return `${MISE_START}\n${tasks[kind]}${MISE_END}`;
+	let content = tasks[kind];
+	if (config.check !== undefined) {
+		const ciStart = content.indexOf("\n[tasks.ci]");
+		content = `[tasks.check]\n${task("Project check command", config.check)}${content.slice(ciStart)}`;
+	}
+	if (config.ci !== undefined) {
+		const ciStart = content.indexOf("[tasks.ci]");
+		content = `${content.slice(0, ciStart)}[tasks.ci]\n${task("Project full CI command", config.ci)}`;
+	}
+	if (config.platform !== undefined) {
+		content += `\n[tasks.platform-check]\n${task("Platform-specific checks", config.platform.command)}`;
+	}
+	return `${MISE_START}\n${content}${MISE_END}`;
 }
 
-function workflowContent(): string {
+function workflowContent(config: ProjectConfig): string {
+	const platform =
+		config.platform === undefined
+			? ""
+			: `
+
+  platform:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [${config.platform.runners.map((runner) => JSON.stringify(runner)).join(", ")}]
+    runs-on: \${{ matrix.runner }}
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup toolchain
+        uses: jdx/mise-action@v4
+
+      - name: Run platform checks
+        run: mise run platform-check
+`;
 	return `${WORKFLOW_MARKER}
 name: CI
 
@@ -145,7 +246,7 @@ jobs:
 
       - name: Run CI gate
         run: mise run ci
-`;
+${platform}`;
 }
 
 function agentsBlock(): string {
@@ -156,7 +257,7 @@ CI contract for this repository (managed by pi-ci-standard — regenerate with \
 
 - Run \`mise run check\` while iterating; fix all failures before continuing.
 - Run \`mise run ci\` before declaring work complete; it must pass.
-- GitHub Actions calls only \`mise run ci\`. Never add language-specific check commands to workflows.
+- GitHub Actions runs project checks only through managed mise tasks. Never add language-specific check commands to workflows.
 ${AGENTS_END}`;
 }
 
@@ -191,9 +292,9 @@ function planned(path: string, action: Planned["action"], content: string | null
 	return { path, action, content };
 }
 
-function planMise(dir: string, kind: Kind): Planned {
+function planMise(dir: string, kind: Kind, config: ProjectConfig): Planned {
 	const path = join(dir, "mise.toml");
-	const block = miseBlock(kind);
+	const block = miseBlock(kind, config);
 	if (!existsSync(path)) return planned(path, "created", `${block}\n`);
 	const content = readFileSync(path, "utf8");
 	const { before, block: existing, after } = splitManaged(content, MISE_START, MISE_END);
@@ -214,9 +315,9 @@ function planMise(dir: string, kind: Kind): Planned {
 	return next === content ? planned(path, "unchanged", null) : planned(path, "updated", next);
 }
 
-function planWorkflow(dir: string): Planned {
+function planWorkflow(dir: string, config: ProjectConfig): Planned {
 	const path = join(dir, ".github", "workflows", "ci.yml");
-	const desired = workflowContent();
+	const desired = workflowContent(config);
 	if (!existsSync(path)) return planned(path, "created", desired);
 	const content = readFileSync(path, "utf8");
 	if (!content.startsWith(WORKFLOW_MARKER)) {
@@ -388,19 +489,23 @@ function fail(label: string, detail: string): Finding {
 	return { ok: false, label, detail };
 }
 
+function pass(label: string, detail?: string): Finding {
+	return detail === undefined || detail === "ok" ? { ok: true, label } : { ok: true, label, detail };
+}
+
 const OK_MISE = "mise.toml";
 const OK_WORKFLOW = "workflow";
 const OK_AGENTS = "AGENTS.md";
 
-function auditMise(dir: string, kind: Kind): Finding[] {
+function auditMise(dir: string, kind: Kind, config: ProjectConfig): Finding[] {
 	const path = join(dir, "mise.toml");
 	if (!isFile(path)) return [fail(OK_MISE, "missing (run: pi-ci init)")];
 	const content = readFileSync(path, "utf8");
 	const { before, block, after } = splitManaged(content, MISE_START, MISE_END);
 	const findings: Finding[] = [];
 	if (block === null) findings.push(fail(OK_MISE, "no pi-ci-standard managed block (run: pi-ci init)"));
-	else if (block !== miseBlock(kind)) findings.push(fail(OK_MISE, "managed block drifted (run: pi-ci init)"));
-	else findings.push({ ok: true, label: OK_MISE });
+	else if (block !== miseBlock(kind, config)) findings.push(fail(OK_MISE, "managed block drifted (run: pi-ci init)"));
+	else findings.push(pass(OK_MISE));
 	const conflict = (before + after).match(MISE_CONFLICT);
 	if (conflict) {
 		findings.push(fail(OK_MISE, `unmanaged ${conflict[0].trim()} present outside managed block`));
@@ -408,14 +513,15 @@ function auditMise(dir: string, kind: Kind): Finding[] {
 	return findings;
 }
 
-function auditWorkflow(dir: string): Finding {
+function auditWorkflow(dir: string, config: ProjectConfig): Finding {
 	const path = join(dir, ".github", "workflows", "ci.yml");
-	const desired = workflowContent();
+	const desired = workflowContent(config);
 	if (!existsSync(path)) return fail(OK_WORKFLOW, ".github/workflows/ci.yml missing (run: pi-ci init)");
 	const content = readFileSync(path, "utf8");
 	if (!content.startsWith(WORKFLOW_MARKER)) return fail(OK_WORKFLOW, "ci.yml not managed by pi-ci-standard");
 	if (content !== desired) return fail(OK_WORKFLOW, "drifted (run: pi-ci init)");
-	return { ok: true, label: OK_WORKFLOW };
+	const runners = ["ubuntu-latest", ...(config.platform?.runners ?? [])];
+	return pass(OK_WORKFLOW, runners.join(", "));
 }
 
 function auditAgents(dir: string): Finding {
@@ -425,15 +531,32 @@ function auditAgents(dir: string): Finding {
 	const { block } = splitManaged(content, AGENTS_START, AGENTS_END);
 	if (block === null) return fail(OK_AGENTS, "no managed Validation block (run: pi-ci init)");
 	if (block !== agentsBlock()) return fail(OK_AGENTS, "managed block drifted (run: pi-ci init)");
-	return { ok: true, label: OK_AGENTS };
+	return pass(OK_AGENTS);
 }
 
 function auditProject(dir: string, kind: Kind): Finding[] {
+	const config = loadConfig(dir, kind);
 	const findings: Finding[] = prerequisites(dir, kind).map((p) =>
-		p.ok ? { ok: true, label: p.label } : fail(p.label, p.problems.join("; ")),
+		p.ok ? pass(p.label, p.detail) : fail(p.label, p.problems.join("; ")),
 	);
-	findings.push(...auditMise(dir, kind));
-	findings.push(auditWorkflow(dir));
+	findings.push(
+		pass(
+			"project commands",
+			kind === "node"
+				? "package.json validate/ci"
+				: `check=${config.check === undefined ? "default" : "custom"}, ci=${config.ci === undefined ? "default" : "custom"}`,
+		),
+	);
+	findings.push(pass("platform runners", config.platform?.runners.join(", ") ?? "none"));
+	if (config.platform !== undefined) {
+		const matches =
+			config.platform.command === config.ci ? "ci" : config.platform.command === config.check ? "check" : null;
+		findings.push(
+			pass("platform command", matches === null ? "distinct" : `matches ${matches}; review duplicate execution`),
+		);
+	}
+	findings.push(...auditMise(dir, kind, config));
+	findings.push(auditWorkflow(dir, config));
 	findings.push(auditAgents(dir));
 	return findings;
 }
@@ -444,19 +567,21 @@ interface ParsedArgs {
 	kind?: string;
 }
 
-const USAGE = "usage: pi-ci init|audit|status [dir] [--kind node|go|rust]";
+const USAGE = "usage: pi-ci init|audit [dir] [--kind node|go|rust]";
 const HELP = `pi-ci-standard manages and audits repository CI configuration.
 
 ${USAGE}
 
 commands:
   init    Generate or update managed CI configuration
-  audit   Audit configuration only; does not run project checks
-  status  Show detected kind, prerequisites, and managed artifact status
+  audit   Show details and audit configuration; does not run project checks
 
 options:
   --kind node|go|rust  Override project-kind detection
   -h, --help           Show this help
+
+configuration:
+  .pi-ci.json  Optional Go/Rust commands and focused platform runners
 
 validation:
   mise run check  Run iterative project checks
@@ -464,7 +589,7 @@ validation:
 
 function parseArgs(argv: string[], cwd: string): ParsedArgs {
 	const [sub, ...rest] = argv;
-	if (sub !== "init" && sub !== "audit" && sub !== "status") {
+	if (sub !== "init" && sub !== "audit") {
 		throw new CiError(sub === undefined ? USAGE : `unknown subcommand "${sub}"\n${USAGE}`);
 	}
 	let dir: string | undefined;
@@ -499,7 +624,8 @@ function dispatch(parsed: ParsedArgs): RunResult {
 	const kind = detectKind(parsed.dir, parsed.kind);
 	if (parsed.sub === "init") {
 		assertPrerequisites(parsed.dir, kind);
-		const plans = [planMise(parsed.dir, kind), planWorkflow(parsed.dir), planAgents(parsed.dir)];
+		const config = loadConfig(parsed.dir, kind);
+		const plans = [planMise(parsed.dir, kind, config), planWorkflow(parsed.dir, config), planAgents(parsed.dir)];
 		for (const plan of plans) {
 			if (plan.content === null) continue;
 			mkdirSync(dirname(plan.path), { recursive: true });
@@ -511,25 +637,17 @@ function dispatch(parsed: ParsedArgs): RunResult {
 		return { code: 0, output: lines.join("\n") };
 	}
 	const findings = auditProject(parsed.dir, kind);
-	if (parsed.sub === "audit") {
-		const lines = findings.map((f) => (f.ok ? `ok ${f.label}` : `FAIL ${f.label}: ${f.detail ?? ""}`));
-		const failed = findings.filter((f) => !f.ok).length;
-		lines.push(
-			failed === 0
-				? `audit passed: configuration only (kind: ${kind}); next: mise run check`
-				: `audit failed: ${failed} finding(s) (kind: ${kind})`,
-		);
-		return { code: failed === 0 ? 0 : 1, output: lines.join("\n") };
-	}
-	const prereqs = prerequisites(parsed.dir, kind);
-	const prereqLabels = new Set(prereqs.map((p) => p.label));
-	const lines = [`kind: ${kind}`];
-	for (const p of prereqs) lines.push(`${p.label}: ${p.detail}`);
-	for (const f of findings) {
-		if (prereqLabels.has(f.label)) continue;
-		lines.push(`${f.label}: ${f.ok ? "ok" : (f.detail ?? "fail")}`);
-	}
-	return { code: 0, output: lines.join("\n") };
+	const lines = findings.map((f) => {
+		const detail = f.detail === undefined ? "" : `: ${f.detail}`;
+		return f.ok ? `ok ${f.label}${detail}` : `FAIL ${f.label}${detail}`;
+	});
+	const failed = findings.filter((f) => !f.ok).length;
+	lines.push(
+		failed === 0
+			? `audit passed: configuration only (kind: ${kind}); next: mise run check`
+			: `audit failed: ${failed} finding(s) (kind: ${kind})`,
+	);
+	return { code: failed === 0 ? 0 : 1, output: lines.join("\n") };
 }
 
 export function run(argv: string[], cwd: string): RunResult {
