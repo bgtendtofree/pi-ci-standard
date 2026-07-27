@@ -6,6 +6,16 @@ export const KINDS = ["node", "go", "rust"] as const;
 
 export class CiError extends Error {}
 
+// ponytail: quote-aware whitespace tokenizer; no escape sequences inside quotes.
+export function tokenize(input: string): string[] {
+	const tokens: string[] = [];
+	const pattern = /"([^"]*)"|'([^']*)'|(\S+)/g;
+	for (const match of input.matchAll(pattern)) {
+		tokens.push(match[1] ?? match[2] ?? match[3] ?? "");
+	}
+	return tokens;
+}
+
 export interface RunResult {
 	code: number;
 	output: string;
@@ -294,7 +304,7 @@ function scriptProblems(scripts: Record<string, string>): string[] {
 	}
 	const quality = (scripts.quality ?? "").trim();
 	if (quality !== "" && quality !== "biome ci .") {
-		problems.push(`script quality must be exactly "biome ci ." (got "${scripts.quality ?? ""}")`);
+		problems.push('script quality must be exactly "biome ci ."');
 	}
 	const validate = (scripts.validate ?? "").trim();
 	if (validate !== "") {

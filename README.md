@@ -30,9 +30,12 @@ Inside Pi:
 /ci init [dir] [--kind node|go|rust]
 /ci audit [dir] [--kind node|go|rust]
 /ci status [dir] [--kind node|go|rust]
+/ci fix [dir] [--kind node|go|rust]
 ```
 
-Same core logic is exposed as a CLI for agents/scripts via bash:
+Quote paths containing spaces: `/ci fix "../my project"` (no escape sequences inside quotes).
+
+Same core logic (init/audit/status only) is exposed as a CLI for agents/scripts via bash:
 
 ```bash
 pi-ci init
@@ -40,9 +43,12 @@ pi-ci audit        # read-only, exit 1 on drift/missing
 pi-ci status       # read-only compact summary, exit 0
 ```
 
+`pi install` loads the extension but may not place the package bin on shell `PATH`. `/ci fix` therefore gives the agent the bundled CLI's absolute path; standalone shell use requires installing/linking the npm package so `pi-ci` is on `PATH`.
+
 - `init` — generate or update the three artifacts. Idempotent: a second run reports `no changes`.
 - `audit` — read-only drift/missing report, nonzero exit on any finding.
 - `status` — read-only one-line-per-artifact summary.
+- `fix` — **Pi-only** (deliberately absent from the `pi-ci` CLI; `pi-ci fix` is invalid). Runs the deterministic audit first: if it passes, notifies `CI standard already satisfied` and does nothing; if it fails with ordinary findings, sends one repair prompt to the agent containing the exact audit output, target directory/kind, bundled CLI path, and safety rules (preserve project checks and thresholds, migrate unmanaged workflow behavior, preserve unrelated config, evidence-based toolchain pins, run bundled `init` → `audit` → `mise run check` → `mise run ci`, fix root causes, no commit/push). Usage/detection errors show a notification instead of invoking the LLM.
 
 ## Project kinds
 
@@ -82,7 +88,7 @@ The project's own `mise.toml` `[tools]` section owns and pins Node/Go/Rust versi
 
 ## Design boundaries
 
-Out of scope, on purpose: no LLM tools or prompt injection, no CI execution (`/ci run` does not exist), no project kinds beyond node/go/rust, no feature-flag/workspace policy invention for rust, no config DSL, no plugin architecture, no dependency installation, no remote CI APIs, no background processes.
+Out of scope, on purpose: no LLM tools or prompt metadata (the only model interaction is the explicit, user-invoked `/ci fix` repair message), no CI execution (`/ci run` does not exist), no project kinds beyond node/go/rust, no feature-flag/workspace policy invention for rust, no config DSL, no plugin architecture, no dependency installation, no remote CI APIs, no background processes.
 
 Known limits: unmanaged-task conflict detection in `mise.toml` covers the `[tasks.check]` / `[tasks.ci]` table forms; exotic inline-table task definitions are not detected.
 

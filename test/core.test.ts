@@ -103,6 +103,7 @@ describe("detection", () => {
 	it("rejects unknown subcommands and flags with usage", () => {
 		assert.match(run([], fixture()).output, /usage: pi-ci/);
 		assert.match(run(["run"], fixture()).output, /unknown subcommand "run"/);
+		assert.match(run(["fix"], fixture()).output, /unknown subcommand "fix"/);
 		assert.match(run(["status", "--force"], fixture()).output, /unknown flag: --force/);
 	});
 });
