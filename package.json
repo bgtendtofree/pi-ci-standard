@@ -1,0 +1,53 @@
+{
+	"name": "pi-ci-standard",
+	"version": "0.1.0",
+	"description": "Deterministic CI-standard generator/auditor for Pi: manages mise tasks, GitHub Actions, and AGENTS.md validation contract",
+	"type": "module",
+	"license": "MIT",
+	"engines": {
+		"node": ">=24"
+	},
+	"keywords": [
+		"pi-package",
+		"pi",
+		"pi-extension",
+		"ci",
+		"mise"
+	],
+	"files": [
+		"src",
+		"README.md",
+		"LICENSE"
+	],
+	"bin": {
+		"pi-ci": "./src/cli.ts"
+	},
+	"pi": {
+		"extensions": [
+			"./src/index.ts"
+		]
+	},
+	"scripts": {
+		"typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.test.json",
+		"lint": "biome lint .",
+		"format": "biome format --write .",
+		"format:check": "biome format .",
+		"fix": "biome check --write .",
+		"quality": "biome ci .",
+		"test": "node --test",
+		"smoke": "pi --offline --no-extensions -e . --list-models",
+		"smoke:package": "node scripts/smoke-package.mjs",
+		"package:check": "npm pack --dry-run",
+		"validate": "npm run quality && npm run typecheck && npm test",
+		"ci": "npm run quality && npm run typecheck && npm test && npm run smoke && npm run package:check && npm run smoke:package"
+	},
+	"peerDependencies": {
+		"@earendil-works/pi-coding-agent": "*"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "2.5.4",
+		"@earendil-works/pi-coding-agent": "0.82.1",
+		"@types/node": "^24.0.0",
+		"typescript": "7.0.2"
+	}
+}
