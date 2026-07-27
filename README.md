@@ -39,14 +39,15 @@ Same core logic (init/audit/status only) is exposed as a CLI for agents/scripts 
 
 ```bash
 pi-ci init
-pi-ci audit        # read-only, exit 1 on drift/missing
+pi-ci audit        # configuration-only, exit 1 on drift/missing
 pi-ci status       # read-only compact summary, exit 0
+pi-ci --help
 ```
 
 `pi install` loads the extension but may not place the package bin on shell `PATH`. `/ci fix` therefore gives the agent the bundled CLI's absolute path; standalone shell use requires installing/linking the npm package so `pi-ci` is on `PATH`.
 
 - `init` — generate or update the three artifacts. Idempotent: a second run reports `no changes`.
-- `audit` — read-only drift/missing report, nonzero exit on any finding.
+- `audit` — read-only configuration drift/missing report, nonzero exit on any finding. It does not run project checks; use `mise run check` or `mise run ci` for execution.
 - `status` — read-only one-line-per-artifact summary.
 - `fix` — **Pi-only** (deliberately absent from the `pi-ci` CLI; `pi-ci fix` is invalid). Runs the deterministic audit first: if it passes, notifies `CI standard already satisfied` and does nothing; if it fails with ordinary findings, sends one repair prompt to the agent containing the exact audit output, target directory/kind, bundled CLI path, and safety rules (preserve project checks and thresholds, migrate unmanaged workflow behavior, preserve unrelated config, evidence-based toolchain pins, run bundled `init` → `audit` → `mise run check` → `mise run ci`, fix root causes, no commit/push). Usage/detection errors show a notification instead of invoking the LLM.
 

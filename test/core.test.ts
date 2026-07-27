@@ -106,6 +106,16 @@ describe("detection", () => {
 		assert.match(run(["fix"], fixture()).output, /unknown subcommand "fix"/);
 		assert.match(run(["status", "--force"], fixture()).output, /unknown flag: --force/);
 	});
+
+	it("shows help without requiring a project", () => {
+		for (const args of [["--help"], ["-h"], ["help"], ["audit", "--help"]]) {
+			const result = run(args, fixture());
+			assert.equal(result.code, 0, result.output);
+			assert.ok(result.output.includes("audit   Audit configuration only; does not run project checks"));
+			assert.ok(result.output.includes("mise run check  Run iterative project checks"));
+			assert.ok(result.output.includes("mise run ci     Run full CI gate"));
+		}
+	});
 });
 
 describe("prerequisites", () => {
@@ -428,7 +438,7 @@ describe("audit and status", () => {
 		assert.equal(run(["init"], dir).code, 0);
 		const audit = run(["audit"], dir);
 		assert.equal(audit.code, 0, audit.output);
-		assert.match(audit.output, /audit passed \(kind: node\)/);
+		assert.match(audit.output, /audit passed: configuration only \(kind: node\); next: mise run check/);
 	});
 
 	it("audit fails with nonzero exit when pieces are missing", () => {
@@ -509,5 +519,9 @@ describe("cli bin", () => {
 		const bad = spawnSync(process.execPath, [cliPath, "audit", join(dir, "does-not-exist")], { encoding: "utf8" });
 		assert.equal(bad.status, 1);
 		assert.match(bad.stderr, /not a directory/);
+
+		const help = spawnSync(process.execPath, [cliPath, "--help"], { encoding: "utf8" });
+		assert.equal(help.status, 0, help.stderr);
+		assert.ok(help.stdout.includes("audit   Audit configuration only"));
 	});
 });

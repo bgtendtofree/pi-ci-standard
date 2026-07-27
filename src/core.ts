@@ -445,6 +445,22 @@ interface ParsedArgs {
 }
 
 const USAGE = "usage: pi-ci init|audit|status [dir] [--kind node|go|rust]";
+const HELP = `pi-ci-standard manages and audits repository CI configuration.
+
+${USAGE}
+
+commands:
+  init    Generate or update managed CI configuration
+  audit   Audit configuration only; does not run project checks
+  status  Show detected kind, prerequisites, and managed artifact status
+
+options:
+  --kind node|go|rust  Override project-kind detection
+  -h, --help           Show this help
+
+validation:
+  mise run check  Run iterative project checks
+  mise run ci     Run full CI gate`;
 
 function parseArgs(argv: string[], cwd: string): ParsedArgs {
 	const [sub, ...rest] = argv;
@@ -498,7 +514,11 @@ function dispatch(parsed: ParsedArgs): RunResult {
 	if (parsed.sub === "audit") {
 		const lines = findings.map((f) => (f.ok ? `ok ${f.label}` : `FAIL ${f.label}: ${f.detail ?? ""}`));
 		const failed = findings.filter((f) => !f.ok).length;
-		lines.push(failed === 0 ? `audit passed (kind: ${kind})` : `audit failed: ${failed} finding(s) (kind: ${kind})`);
+		lines.push(
+			failed === 0
+				? `audit passed: configuration only (kind: ${kind}); next: mise run check`
+				: `audit failed: ${failed} finding(s) (kind: ${kind})`,
+		);
 		return { code: failed === 0 ? 0 : 1, output: lines.join("\n") };
 	}
 	const prereqs = prerequisites(parsed.dir, kind);
@@ -513,6 +533,7 @@ function dispatch(parsed: ParsedArgs): RunResult {
 }
 
 export function run(argv: string[], cwd: string): RunResult {
+	if (argv[0] === "help" || argv.includes("--help") || argv.includes("-h")) return { code: 0, output: HELP };
 	try {
 		return dispatch(parseArgs(argv, cwd));
 	} catch (err) {

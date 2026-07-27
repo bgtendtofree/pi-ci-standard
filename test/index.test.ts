@@ -190,6 +190,6 @@ describe("pi-ci-standard extension", () => {
 		notifications.length = 0;
 		await command.handler(`audit "${dir}"`, ctx);
 		assert.equal(notifications[0]?.level, "info");
-		assert.match(notifications[0]?.text ?? "", /audit passed \(kind: node\)/);
+		assert.match(notifications[0]?.text ?? "", /audit passed: configuration only \(kind: node\)/);
 	});
 });
